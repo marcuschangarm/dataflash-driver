@@ -1,6 +1,6 @@
 # DataFlash Driver
 
-Block device driver for I2C based EEPROM devices such as the Adesto AT45DB
+Block device driver for SPI based EEPROM devices such as the Adesto AT45DB
 series of devices.
 
 DataFlash is a memory protocol that combines flash with SRAM buffers for a
@@ -24,8 +24,11 @@ https://en.wikipedia.org/wiki/DataFlash
 // Create DataFlash on SPI bus with PTE5 as chip select
 DataFlashBlockDevice dataflash(PTE2, PTE4, PTE1, PTE5);
 
-// Create DataFlash on SPI bus with PTE6 as write-protect
-DataFlashBlockDevice dataflash2(PTE2, PTE4, PTE1, PTE5, PTE6);
+// Create DataFlash on SPI bus at 40 MHz SCLK
+DataFlashBlockDevice dataflash1(PTE2, PTE4, PTE1, PTE5, 40000000);
+
+// Create DataFlash on SPI bus with PTE6 as not-write-protect
+DataFlashBlockDevice dataflash2(PTE2, PTE4, PTE1, PTE5, 40000000, PTE6);
 
 int main() {
     printf("dataflash test\n");

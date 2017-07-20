@@ -64,6 +64,7 @@ enum command {
     DATAFLASH_COMMAND_WRITE_ENABLE         = 0x3D2A7FA9,
     DATAFLASH_COMMAND_BINARY_PAGE_SIZE     = 0x3D2A80A6,
     DATAFLASH_COMMAND_DATAFLASH_PAGE_SIZE  = 0x3D2A80A7,
+    DATAFLASH_COMMAND_SOFTWARE_RESET       = 0xF0000000,
 };
 
 /* bit masks for interpreting the status register */
@@ -127,6 +128,8 @@ enum dummy {
     DATAFLASH_HIGHEST_FREQUENCY_BYTES = 2
 };
 
+SingletonPtr<PlatformMutex> DataFlashBlockDevice::_mutex;
+
 DataFlashBlockDevice::DataFlashBlockDevice(PinName mosi,
                                      PinName miso,
                                      PinName sclk,
@@ -159,106 +162,121 @@ int DataFlashBlockDevice::init()
 {
     DEBUG_PRINTF("init\r\n");
 
+    /* lock module */
+    _mutex->lock();
+
     int result = BD_ERROR_DEVICE_ERROR;
 
-    /* read ID register to validate model and set dimensions */
-    uint16_t id = _get_register(DATAFLASH_OP_ID);
+    /* reset device */
+    _write_command(DATAFLASH_COMMAND_SOFTWARE_RESET, NULL, 0);
 
-    DEBUG_PRINTF("id: %04X\r\n", id & DATAFLASH_ID_MATCH);
+    /* wait for device to be ready and update return code */
+    result = _sync();
 
-    /* get status register to verify the page size mode */
-    uint16_t status = _get_register(DATAFLASH_OP_STATUS);
+    /* only continue if reset was successful */
+    if (result == BD_ERROR_OK) {
+        /* read ID register to validate model and set dimensions */
+        uint16_t id = _get_register(DATAFLASH_OP_ID);
 
-    /* manufacture ID match */
-    if ((id & DATAFLASH_ID_MATCH) == DATAFLASH_ID_MATCH) {
+        DEBUG_PRINTF("id: %04X\r\n", id & DATAFLASH_ID_MATCH);
 
-        /* calculate density */
-        _device_size = 0x8000 << (id & DATAFLASH_ID_DENSITY_MASK);
+        /* get status register to verify the page size mode */
+        uint16_t status = _get_register(DATAFLASH_OP_STATUS);
 
-        bool binary_page_size = true;
+        /* manufacture ID match */
+        if ((id & DATAFLASH_ID_MATCH) == DATAFLASH_ID_MATCH) {
 
-        /* check if device is configured for binary page sizes */
-        if ((status & DATAFLASH_BIT_PAGE_SIZE) == DATAFLASH_BIT_PAGE_SIZE) {
-            DEBUG_PRINTF("Page size is binary\r\n");
+            /* calculate density */
+            _device_size = 0x8000 << (id & DATAFLASH_ID_DENSITY_MASK);
+
+            bool binary_page_size = true;
+
+            /* check if device is configured for binary page sizes */
+            if ((status & DATAFLASH_BIT_PAGE_SIZE) == DATAFLASH_BIT_PAGE_SIZE) {
+                DEBUG_PRINTF("Page size is binary\r\n");
 
 #if MBED_CONF_DATAFLASH_DATAFLASH_SIZE
-            /* send reconfiguration command */
-            _write_command(DATAFLASH_COMMAND_DATAFLASH_PAGE_SIZE, NULL, 0);
+                /* send reconfiguration command */
+                _write_command(DATAFLASH_COMMAND_DATAFLASH_PAGE_SIZE, NULL, 0);
 
-            /* wait for device to be ready and update return code */
-            result = _sync();
+                /* wait for device to be ready and update return code */
+                result = _sync();
 
-            /* set binary flag */
-            binary_page_size = false;
+                /* set binary flag */
+                binary_page_size = false;
 #else
-            /* set binary flag */
-            binary_page_size = true;
+                /* set binary flag */
+                binary_page_size = true;
 #endif
-        } else {
-            DEBUG_PRINTF("Page size is not binary\r\n");
+            } else {
+                DEBUG_PRINTF("Page size is not binary\r\n");
 
 #if MBED_CONF_DATAFLASH_BINARY_SIZE
-            /* send reconfiguration command */
-            _write_command(DATAFLASH_COMMAND_BINARY_PAGE_SIZE, NULL, 0);
+                /* send reconfiguration command */
+                _write_command(DATAFLASH_COMMAND_BINARY_PAGE_SIZE, NULL, 0);
 
-            /* wait for device to be ready and update return code */
-            result = _sync();
+                /* wait for device to be ready and update return code */
+                result = _sync();
 
-            /* set binary flag */
-            binary_page_size = true;
+                /* set binary flag */
+                binary_page_size = true;
 #else
-            /* set binary flag */
-            binary_page_size = false;
+                /* set binary flag */
+                binary_page_size = false;
 #endif
+            }
+
+            /* set page program size and block erase size */
+            switch (id & DATAFLASH_ID_DENSITY_MASK) {
+                case DATAFLASH_ID_DENSITY_2_MBIT:
+                case DATAFLASH_ID_DENSITY_4_MBIT:
+                case DATAFLASH_ID_DENSITY_8_MBIT:
+                case DATAFLASH_ID_DENSITY_64_MBIT:
+                    if (binary_page_size) {
+                        _page_size = DATAFLASH_PAGE_SIZE_256;
+                        _block_size = DATAFLASH_BLOCK_SIZE_2K;
+                    } else {
+                        _page_size = DATAFLASH_PAGE_SIZE_264;
+                        _block_size = DATAFLASH_BLOCK_SIZE_2K1;
+
+                        /* adjust device size */
+                        _device_size = (_device_size / DATAFLASH_PAGE_SIZE_256) *
+                                        DATAFLASH_PAGE_SIZE_264;
+                    }
+                    break;
+                case DATAFLASH_ID_DENSITY_16_MBIT:
+                case DATAFLASH_ID_DENSITY_32_MBIT:
+                    if (binary_page_size) {
+                        _page_size = DATAFLASH_PAGE_SIZE_512;
+                        _block_size = DATAFLASH_BLOCK_SIZE_4K;
+                    } else {
+                        _page_size = DATAFLASH_PAGE_SIZE_528;
+                        _block_size = DATAFLASH_BLOCK_SIZE_4K1;
+
+                        /* adjust device size */
+                        _device_size = (_device_size / DATAFLASH_PAGE_SIZE_512) *
+                                        DATAFLASH_PAGE_SIZE_528;
+                    }
+                    break;
+                default:
+                    break;
+            }
+
+            DEBUG_PRINTF("density: %" PRIu16 "\r\n", id & DATAFLASH_ID_DENSITY_MASK);
+            DEBUG_PRINTF("size: %" PRIu32 "\r\n", _device_size);
+            DEBUG_PRINTF("page: %" PRIu16 "\r\n", _page_size);
+            DEBUG_PRINTF("block: %" PRIu16 "\r\n", _block_size);
+
+            /* device successfully detected, set OK error code */
+            result = BD_ERROR_OK;
         }
 
-        /* set page program size and block erase size */
-        switch (id & DATAFLASH_ID_DENSITY_MASK) {
-            case DATAFLASH_ID_DENSITY_2_MBIT:
-            case DATAFLASH_ID_DENSITY_4_MBIT:
-            case DATAFLASH_ID_DENSITY_8_MBIT:
-            case DATAFLASH_ID_DENSITY_64_MBIT:
-                if (binary_page_size) {
-                    _page_size = DATAFLASH_PAGE_SIZE_256;
-                    _block_size = DATAFLASH_BLOCK_SIZE_2K;
-                } else {
-                    _page_size = DATAFLASH_PAGE_SIZE_264;
-                    _block_size = DATAFLASH_BLOCK_SIZE_2K1;
-
-                    /* adjust device size */
-                    _device_size = (_device_size / DATAFLASH_PAGE_SIZE_256) *
-                                    DATAFLASH_PAGE_SIZE_264;
-                }
-                break;
-            case DATAFLASH_ID_DENSITY_16_MBIT:
-            case DATAFLASH_ID_DENSITY_32_MBIT:
-                if (binary_page_size) {
-                    _page_size = DATAFLASH_PAGE_SIZE_512;
-                    _block_size = DATAFLASH_BLOCK_SIZE_4K;
-                } else {
-                    _page_size = DATAFLASH_PAGE_SIZE_528;
-                    _block_size = DATAFLASH_BLOCK_SIZE_4K1;
-
-                    /* adjust device size */
-                    _device_size = (_device_size / DATAFLASH_PAGE_SIZE_512) *
-                                    DATAFLASH_PAGE_SIZE_528;
-                }
-                break;
-            default:
-                break;
-        }
-
-        DEBUG_PRINTF("density: %" PRIu16 "\r\n", id & DATAFLASH_ID_DENSITY_MASK);
-        DEBUG_PRINTF("size: %" PRIu32 "\r\n", _device_size);
-        DEBUG_PRINTF("page: %" PRIu16 "\r\n", _page_size);
-        DEBUG_PRINTF("block: %" PRIu16 "\r\n", _block_size);
-
-        /* device successfully detected, set OK error code */
-        result = BD_ERROR_OK;
+        /* write protect device when idle */
+        _write_enable(false);
     }
 
-    /* write protect device when idle */
-    _write_enable(false);
+    /* unlock module */
+    _mutex->unlock();
 
     return result;
 }
@@ -273,6 +291,9 @@ int DataFlashBlockDevice::deinit()
 int DataFlashBlockDevice::read(void *buffer, bd_addr_t addr, bd_size_t size)
 {
     DEBUG_PRINTF("read: %p %" PRIX64 " %" PRIX64 "\r\n", buffer, addr, size);
+
+    /* lock module */
+    _mutex->lock();
 
     int result = BD_ERROR_DEVICE_ERROR;
 
@@ -308,12 +329,18 @@ int DataFlashBlockDevice::read(void *buffer, bd_addr_t addr, bd_size_t size)
         result = BD_ERROR_OK;
     }
 
+    /* unlock module */
+    _mutex->unlock();
+
     return result;
 }
 
 int DataFlashBlockDevice::program(const void *buffer, bd_addr_t addr, bd_size_t size)
 {
     DEBUG_PRINTF("program: %p %" PRIX64 " %" PRIX64 "\r\n", buffer, addr, size);
+
+    /* lock module */
+    _mutex->lock();
 
     int result = BD_ERROR_DEVICE_ERROR;
 
@@ -370,12 +397,18 @@ int DataFlashBlockDevice::program(const void *buffer, bd_addr_t addr, bd_size_t 
         _write_enable(false);
     }
 
+    /* unlock module */
+    _mutex->unlock();
+
     return result;
 }
 
 int DataFlashBlockDevice::erase(bd_addr_t addr, bd_size_t size)
 {
     DEBUG_PRINTF("erase: %" PRIX64 " %" PRIX64 "\r\n", addr, size);
+
+    /* lock module */
+    _mutex->lock();
 
     int result = BD_ERROR_DEVICE_ERROR;
 
@@ -419,6 +452,9 @@ int DataFlashBlockDevice::erase(bd_addr_t addr, bd_size_t size)
         /* enable write protection */
         _write_enable(false);
     }
+
+    /* unlock module */
+    _mutex->unlock();
 
     return result;
 }

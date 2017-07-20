@@ -31,8 +31,11 @@
  *  // Create DataFlash on SPI bus with PTE5 as chip select
  *  DataFlashBlockDevice dataflash(PTE2, PTE4, PTE1, PTE5);
  *
- *  // Create DataFlash on SPI bus with PTE6 as write-protect
- *  DataFlashBlockDevice dataflash2(PTE2, PTE4, PTE1, PTE5, PTE6);
+ *  // Create DataFlash on SPI bus at 40 MHz SCLK
+ *  DataFlashBlockDevice dataflash1(PTE2, PTE4, PTE1, PTE5, 40000000);
+ *
+ *  // Create DataFlash on SPI bus with PTE6 as not-write-protect
+ *  DataFlashBlockDevice dataflash2(PTE2, PTE4, PTE1, PTE5, 40000000, PTE6);
  *
  *  int main() {
  *      printf("dataflash test\n");
@@ -67,15 +70,15 @@ public:
      *  @param miso     SPI master in, slave out pin
      *  @param sclk     SPI clock pin
      *  @param csel     SPI chip select pin
-     *  @param nowp     GPIO not-write-protect
      *  @param freq     Clock speed of the SPI bus (defaults to 40MHz)
+     *  @param nowp     GPIO not-write-protect
      */
     DataFlashBlockDevice(PinName mosi,
-                      PinName miso,
-                      PinName sclk,
-                      PinName csel,
-                      int freq = 40000000,
-                      PinName nowp = NC);
+                         PinName miso,
+                         PinName sclk,
+                         PinName csel,
+                         int freq = 40000000,
+                         PinName nowp = NC);
 
     /** Initialize a block device
      *
@@ -163,6 +166,8 @@ private:
     int _sync(void);
     int _write_page(const uint8_t *buffer, uint32_t addr, uint32_t offset, uint32_t size);
     uint32_t _translate_address(bd_addr_t addr);
+
+    static SingletonPtr<PlatformMutex> _mutex;
 };
 
 
